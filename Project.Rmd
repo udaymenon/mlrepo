@@ -1,0 +1,166 @@
+---
+title: "Predicting Quality of Execution using WLE DataSet"
+author: "Uday Menon"
+date: "Saturday, April 25, 2015"
+output: html_document
+---
+
+##Executive Summary
+The Weight Lifting Exercises (WLE) DataSet http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises) provides on-body sensor data measurements taken during performance of Unilateral Dumbbell Biceps Curl in a variety of ways, with a letter grade ranging from A-E to denote how well each variant of the exercise was performed. We describe several machine learning classification models that use a subset of the sensor data as predictors of the quality of execution (*classe* variable in the dataset). 
+
+Using the test dataset as our starting point, we work backwards to define a subset of the 160 variables that are meaningful as predictors. After dropping 100 variables that have NA as their only value and 8 more variables that capture time of day, user id and similar information that are deemed to have no bearing on quality of execution, we are left with 52 potential predictors in the test dataset. Pruning the training dataset of these 108 variables we reduce it to 52 predictors and 1 predicted (*classe*) variable. 
+
+No imputation of missing values was required to be performed on the remaining 52 predictors in the training set so we proceed to partition the 19622 rows of the training set into a *train* and *test* subset in a 3:1 split using the *createDataPartition* function in the *caret* package which performs random assignment without replacement.  
+
+Three different machine learning algorithms were used to build the classification model using the *train* subset: 1. Random Forest; 2. Support Vector Machine (SVM); and 3. Classification and Regression Trees (CART). The first two yielded accuracy levels of 0.99 and 0.97 respectively while the third only achieved 0.5. 
+
+In the rest of this report we provide more details on each model fitting, the tuning parameters, cross-validation rate and the out of sample error rate. We also show how our chosen model (random forest) predicts quality of execution for the 20-sample test dataset and compare this with the prediction of our SVM model. 
+
+##PreProcessing Data
+We use the testing dataset as our guide during this important preprocessing step. As the analysis below shows, removing columns from testing where all values are NA results in reduction from 160 to 60 columns: 58 predictors, *X, problem_id*. 
+
+Since we are going to use our model to predict the *classe* of the testing rows, the **model cannot have predictors that are absent from the testing dataset**. This reduces the predictor set in the training dataset to the same 58 columns.
+
+In a final step we also remove columns *X,user_name,raw_timestamp_part_1,raw_timestamp_part_2,cvtd_timestamp,new_window, num_window,problem_id* which by their names imply they are merely labels for the data but do not impact quality of execution (*classe*).
+
+```{r cache=TRUE}
+library(ggplot2, quietly=TRUE)
+library(caret, quietly=TRUE)
+
+##read training and testing datsets
+training <- read.csv("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+testing <- read.csv("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+
+##remove columns that only have NA value in them
+testing <- testing[,colSums(is.na(testing))<nrow(testing)]
+
+##Now remove columns that provide descriptive labels without impacting dependent variable
+predictors <- names(testing)[! names(testing) %in% c("X","user_name","raw_timestamp_part_1",
+                                                      "raw_timestamp_part_2","cvtd_timestamp",                               
+                                                     "new_window", "num_window",   "problem_id")]
+
+##add dependent variable to final set of variables
+finalTrainingCols <- append(predictors,"classe")
+
+##subset training dataset based on final variable set
+training <- training[,finalTrainingCols]
+```
+
+A check for NA values in our training set returns ```r any(is.na(training))``` which implies we do not require NULL value imputation. 
+
+Using *caret's createDataPartition* function we partition the *training* set into a *trainset* and *testset*, holding out the latter to predict its *classe* using the model we will build using the *trainset*.  The misclassification error computed on the holdout *testset* is used as a measure of our out-of-sample error rate. 
+
+```{r cache=TRUE}
+##split training set into train and test subsets to test our model
+inTrain <- createDataPartition(y=training$classe,
+                               p=0.75, list=FALSE)
+
+trainset <- training[inTrain,]
+testset <- training[-inTrain,]
+
+```
+
+##Model1: Random Forest 
+We use the *train* function from the *caret* package to build our random forest model. It employs the *trainControl* function with *oob* (out-of-bag) error estimation in which each tree is constructed using a different bootstrap sample from the original data which is centered and scaled to normalize it.
+
+Since this algorithm does its own cross-validation (cv) by holding out  one-third of the cases from each bootstrap sample, we do not include cv as a model parameter and instead obtain a measure of out of sample error by using the trained model to predict the dependent variable for the *testset*. 
+
+
+```{r cache=TRUE}
+library(randomForest, quietly=TRUE)
+##Runtime = 6min
+set.seed(32343)
+rf <- train(trainset$classe ~ .,
+                  method="rf", 
+                  preProcess=c("center","scale"),
+                  data=trainset,
+                  trControl = trainControl(method = "oob"),
+                  importance = TRUE,
+                  verbose = TRUE)
+
+print(rf$finalModel)
+
+confusionMatrix(testset$classe,predict(rf,testset))
+```
+
+**Figure 1** shows the relative importance of the predictors used in the Random Forest Model which comprises 500 trees with an OOB error rate of 0.61%. As this shows, about 30 predictors out of the 52 account for the bulk of the variance. 
+
+The confusionMatrix shows a misclassification of 20 out of 4904 for an out-of-sample error rate of ```r round(20/4904,3)``` and overall Accuracy of 0.9959.  Sensitivity, Specificity, Positive and Negative Predictive values are also consistently in the 0.99 range making this model amazingly powerful as a classifier.
+
+
+```{r cache=TRUE, echo=FALSE}
+library(randomForest, quietly=TRUE)
+varImpPlot(rf$finalModel, main="Figure 1: Importance of Predictors in Random Forest Model")
+
+```
+
+##Model2: SVM (Suport Vector Machine)
+To build this model we again use the *train* function from the *caret* package with bootstrapping to create resampling. We present the results for *number=25* which is the number of repetitions of the sampling process. 
+
+This algorithm is computationally intensive as borne out out by the need to harness all 4 cores of the Intel i5-2300 CPU @2.80Ghz, 2800Mhz with a runtime of 44 minutes (compared to 6 min for the randomforest algorithm).
+
+As we see from the confusionMatrix, this model misclassifies 150 out of 4904 *testset* cases for an out-of-sample error rate of ```r round(150/4904,3)``` and overall Accuracy of 0.97. Sensitivity ranges from 0.91 to 0.99 depending on the predicted class while Specificity is consistently high at 0.98. 
+
+```{r cache=TRUE}
+
+##Setup to use all 4 cores
+library(doParallel)
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+library(caret);
+
+set.seed(32343)
+bootControl <- trainControl(number = 25)
+svmRadial <- train(trainset$classe ~ .,
+                  method="svmRadial", 
+                  preProcess=c("center","scale"),
+                  tuneLength = 5,
+                  data=trainset,
+                  trControl = bootControl,
+                  scaled = FALSE)  
+print(svmRadial)
+confusionMatrix(testset$classe,predict(svmRadial,testset))
+
+```
+
+##Model3: CART (Classification and Regression Tree)
+We include this model in order to contrast it with the random forest model and show the inherent higher bias in a model that uses a single tree vs on that uses 500. This model employs cross-validation with 10 resamples but only yields an overall Accuracy of 0.49 when used to predict the *testset*. Misclassification rate or out-of-sample error rate is ```r round(2497/4904,3)``` which is significantly higher than what we saw with the random forest and SVM models. 
+
+
+
+```{r cache=TRUE}
+
+set.seed(32343)
+rpart <- train(trainset$classe ~ .,
+                  method="rpart", 
+                  preProcess=c("center","scale"),
+                  data=trainset,
+                  trControl = trainControl(method = "cv")               
+                  )
+
+confusionMatrix(testset$classe,predict(rpart,testset))
+```
+
+##Prediction On 20-sample *testing* Dataset
+
+###Random Forest model prediction
+```{r cache=TRUE, echo=FALSE}
+##Random Forest model prediction
+predict(rf, testing)
+```
+
+###SVM model prediction
+```{r cache=TRUE, echo=FALSE}
+predict(svmRadial, testing)
+```
+
+###CART model prediction
+```{r cache=TRUE, echo=FALSE}
+predict(rpart, testing)
+```
+
+##Summary
+We compare the prediction accuracy of three different models built using Random Forest, SVM and CART algorithms and show that the Random Forest model consistently outperforms the other two. While the SVM model also yields high accuracy when applied to the *testset*, it is computationally the most intensive of all three. 
+
+Both Random Forest and SVM yield the same prediction on the 20-sample *testing* dataset which is to be expected given their high levels of accuracy, low out-of-sample error rates and the fact that this *testing* dataset is so small. The CART model prediction differs considerably from both these as expected. 
+
